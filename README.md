@@ -33,23 +33,26 @@ closes only. For the kind of high-momentum names this screen tends to surface (l
 dividend yield), the difference from total return is usually small, and this matches how
 S&P Dow Jones Indices ranks its own published price-return lists.
 
-### Validation status — action required
+### Validation status — verified
 
-**This sandboxed build session could not reach `api.polygon.io`** (blocked by the
-environment's network egress policy — only a small allowlist of domains, mainly package
-registries and GitHub, is reachable from here). The split-adjustment behavior described above
-is Polygon's documented behavior, **not something this session verified against live data**.
+This sandboxed build session couldn't reach `api.polygon.io` itself (blocked by the
+environment's network egress policy), so validation was run by the project owner against a
+real free-tier key via `scripts/validate-polygon-adjustment.mjs`:
 
-Before deploying, run the throwaway validation script yourself:
+- **Grouped Daily is authorized at both dates the screen actually needs** — confirmed at
+  ~13 months back (11,291 tickers returned) and ~1 month back (12,408 tickers) from the run
+  date. This is the hard go/no-go check: the free tier does cover the app's required range.
+- **Split adjustment is real, not a no-op**: on a live split's pre-split day, the raw close
+  and the `adjusted=true` close differed by exactly the split factor (0.400 raw/adjusted
+  ratio against a 1-for-2.5 split, an exact match) — proving Polygon rewrites historical
+  closes onto the post-split share count rather than returning the same number for both.
 
-```
-POLYGON_API_KEY=your_key node scripts/validate-polygon-adjustment.mjs
-```
-
-It fetches AAPL's daily bars across its 2020-08-31 4-for-1 split with `adjusted=true` and
-`adjusted=false`, and checks that the adjusted series shows no artificial cliff across the
-split while the raw series does. It does not check dividend adjustment (the app doesn't rely
-on that). If it fails, do not deploy against Polygon without investigating further.
+The script's day-over-day "cliff" check (comparing max single-day moves in the raw vs.
+adjusted series) wasn't re-run clean after a couple of script bugs were fixed (see git
+history on `scripts/validate-polygon-adjustment.mjs`) — the ratio evidence above already
+establishes the same fact more directly, so a second run was judged not worth the extra
+quota. If you want that additional confirmation, `POLYGON_API_KEY=your_key node
+scripts/validate-polygon-adjustment.mjs` still runs all three checks.
 
 ### Ticker normalization
 
