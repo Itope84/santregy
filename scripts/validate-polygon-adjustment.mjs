@@ -51,7 +51,16 @@ function addDays(dateStr, days) {
   return isoDate(dt);
 }
 
+// Free tier is 5 calls/minute. Unlike the real app (worker/lib/polygon.ts), this script has
+// no reason to run two requests concurrently, so a simple await-based delay is enough.
+let lastCallAt = 0;
+const MIN_INTERVAL_MS = 13_000;
+
 async function polygonGet(path) {
+  const wait = lastCallAt + MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallAt = Date.now();
+
   const url = `${BASE}${path}${path.includes("?") ? "&" : "?"}apiKey=${apiKey}`;
   const res = await fetch(url);
   const json = await res.json().catch(() => ({}));
@@ -86,8 +95,12 @@ async function checkGroupedDailyReachable(label, targetDate) {
 // ---------- Check 2: does adjusted=true really rewrite prices across a real, recent split? ----------
 
 async function findRecentSplit() {
+  const today = isoDate(new Date());
+  // execution_date.lte excludes announced/upcoming splits — /v3/reference/splits sorted desc
+  // otherwise surfaces those first, and there's no price history for a split that hasn't
+  // happened yet.
   const { ok, status, json } = await polygonGet(
-    "/v3/reference/splits?limit=10&order=desc&sort=execution_date",
+    `/v3/reference/splits?limit=10&order=desc&sort=execution_date&execution_date.lte=${today}`,
   );
   if (!ok) {
     console.log(`  Couldn't fetch splits reference: (${status}) ${json.message ?? JSON.stringify(json)}`);
@@ -96,7 +109,7 @@ async function findRecentSplit() {
   const results = json.results ?? [];
   // Prefer a split well inside a 2-year plan window, but still take the most recent one
   // available if nothing is younger than 18 months.
-  const eighteenMonthsAgo = subtractMonths(isoDate(new Date()), 18);
+  const eighteenMonthsAgo = subtractMonths(today, 18);
   const candidate =
     results.find((s) => s.execution_date >= eighteenMonthsAgo) ?? results[0] ?? null;
   return candidate;
@@ -117,10 +130,14 @@ async function checkSplitAdjustment() {
     `  Testing ${split.ticker}'s ${split.split_to}:${split.split_from} split (execution date ${split.execution_date})`,
   );
 
-  const [adjRes, rawRes] = await Promise.all([
-    polygonGet(`/v2/aggs/ticker/${split.ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=50`),
-    polygonGet(`/v2/aggs/ticker/${split.ticker}/range/1/day/${from}/${to}?adjusted=false&sort=asc&limit=50`),
-  ]);
+  // Sequential, not Promise.all: both go through the same throttle, and firing them
+  // concurrently would just make them race to read the pre-call timestamp together.
+  const adjRes = await polygonGet(
+    `/v2/aggs/ticker/${split.ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=50`,
+  );
+  const rawRes = await polygonGet(
+    `/v2/aggs/ticker/${split.ticker}/range/1/day/${from}/${to}?adjusted=false&sort=asc&limit=50`,
+  );
   if (!adjRes.ok || !rawRes.ok) {
     console.log(`  FAIL: aggs request failed — adjusted:(${adjRes.status}) raw:(${rawRes.status})`);
     return false;
