@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "santregy",
+  "compatibility_date": "2024-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "./worker/index.ts",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "santregy",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    // Daily at 13:00 UTC (~9am US/Eastern, after prior US market close, well before next open).
+    "crons": ["0 13 * * *"]
+  },
+  "vars": {
+    // Base URL used to build magic-link URLs in emails. Override per environment.
+    "APP_BASE_URL": "http://localhost:5173"
+  }
+}
