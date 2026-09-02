@@ -97,10 +97,13 @@ async function checkGroupedDailyReachable(label, targetDate) {
 async function findRecentSplit() {
   const today = isoDate(new Date());
   // execution_date.lte excludes announced/upcoming splits — /v3/reference/splits sorted desc
-  // otherwise surfaces those first, and there's no price history for a split that hasn't
-  // happened yet.
+  // otherwise surfaces those first. A 14-day buffer (not just "<= today") also matters: a
+  // split executed today or yesterday has no completed post-split trading days yet, so the
+  // day-over-day "cliff" check below would have nothing to compare against and could read as
+  // a false failure even though adjustment is working.
+  const cutoff = addDays(today, -14);
   const { ok, status, json } = await polygonGet(
-    `/v3/reference/splits?limit=10&order=desc&sort=execution_date&execution_date.lte=${today}`,
+    `/v3/reference/splits?limit=10&order=desc&sort=execution_date&execution_date.lte=${cutoff}`,
   );
   if (!ok) {
     console.log(`  Couldn't fetch splits reference: (${status}) ${json.message ?? JSON.stringify(json)}`);
