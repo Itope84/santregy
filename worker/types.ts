@@ -16,6 +16,14 @@ export interface TickerPriceSeries {
   windowStartCandidates: PricePoint[];
   windowEndCandidates: PricePoint[];
   firstAvailable?: PricePoint;
+  /**
+   * Set by the fetch layer when a window-start candidate existed but implied an implausible
+   * return and failed a ticker-identity check (the symbol likely belonged to a different
+   * company at that date — e.g. a rename or a reused ticker) — the candidate was discarded
+   * rather than trusted. screen() surfaces this as a distinct reason in insufficientHistory
+   * instead of treating it like a recent IPO with no history yet.
+   */
+  windowStartIdentityMismatch?: boolean;
 }
 
 export interface UniverseConstituent {
@@ -53,6 +61,10 @@ export interface InsufficientHistoryEntry {
   firstAvailableDate: string | null;
   windowEndDate: string | null;
   windowEndPrice: number | null;
+  /** "no-history": no price found near window start at all (recent IPO/spinoff/addition).
+   * "identity-mismatch": a price was found, but it implied an implausible return and failed
+   * ticker-identity verification, so it was discarded rather than trusted. */
+  reason: "no-history" | "identity-mismatch";
 }
 
 /**

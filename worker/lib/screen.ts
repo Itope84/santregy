@@ -50,8 +50,9 @@ export function screen(input: ScreenInput): ScreenResult {
       continue;
     }
 
-    // Not cleanly rankable (recent IPO/spinoff/addition, or a data gap) — never silently
-    // dropped, always surfaced with whatever we do know.
+    // Not cleanly rankable (recent IPO/spinoff/addition, a data gap, or a ticker-identity
+    // mismatch caught by the fetch layer) — never silently dropped, always surfaced with
+    // whatever we do know.
     const firstAvailable = series?.firstAvailable ?? null;
     const partialReturn =
       firstAvailable && endPoint ? endPoint.close / firstAvailable.close - 1 : null;
@@ -63,6 +64,7 @@ export function screen(input: ScreenInput): ScreenResult {
       firstAvailableDate: firstAvailable?.date ?? null,
       windowEndDate: endPoint?.date ?? null,
       windowEndPrice: endPoint?.close ?? null,
+      reason: series?.windowStartIdentityMismatch ? "identity-mismatch" : "no-history",
     });
   }
 

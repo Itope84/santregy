@@ -69,6 +69,28 @@ count, so mixing window-start and window-end prices from different cache generat
 an intervening split would silently corrupt the return — never read the two endpoints from
 separately-cached data.
 
+### Ticker-identity verification (found in production)
+
+Grouped Daily carries only a ticker string and a close, no company-identity field. A real run
+against production data showed the actual failure mode: a constituent's ticker had apparently
+changed hands within the 13-month lookback window, so the window-start price attached to
+*today's* company was really some unrelated (much cheaper) security's price — an implied
+~1,550% "return" that was briefly ranked as a top pick before this was caught.
+
+`computeScreen()` now flags any implied return past `EXTREME_RETURN_THRESHOLD` (500%) and
+verifies it via `tickerCikAsOf()` — Polygon's `/v3/reference/tickers/{ticker}?date=...`,
+compared between the window-start and window-end dates. A CIK mismatch (or an inconclusive
+lookup) discards the window-start candidate and moves the ticker to `insufficientHistory` with
+`reason: "identity-mismatch"`, distinct from a genuine no-history ticker — it deliberately does
+*not* attempt a `firstAvailableBar` guess for these, since that endpoint could have the same
+ticker-reuse ambiguity and guessing twice compounds the risk rather than resolving it. A
+legitimately huge return (same CIK at both dates) still ranks normally — see
+`test/refresh-identity.test.ts`.
+
+This only adds Polygon calls for tickers that actually trip the threshold — typically zero per
+refresh. It's a targeted fix for the one failure mode observed, not a general point-in-time
+constituent-identity system (that's explicitly deferred scope).
+
 ## Beyond the screen: "current value" needs its own price cache
 
 The spec's caching section describes one global cache for the screen (window-start/end

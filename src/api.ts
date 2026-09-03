@@ -25,6 +25,7 @@ export interface InsufficientHistoryEntry {
   firstAvailableDate: string | null;
   windowEndDate: string | null;
   windowEndPrice: number | null;
+  reason: "no-history" | "identity-mismatch";
 }
 
 export interface ScreenResponse {

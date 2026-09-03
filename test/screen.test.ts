@@ -57,6 +57,39 @@ describe("screen()", () => {
         firstAvailableDate: "2025-02-25",
         windowEndDate: "2026-08-03",
         windowEndPrice: 60,
+        reason: "no-history",
+      },
+    ]);
+  });
+
+  it("flags a ticker whose window-start price failed identity verification, with its own reason and no first-available guess", () => {
+    // The fetch layer clears windowStartCandidates and sets windowStartIdentityMismatch when
+    // an implausible return fails a ticker-identity check (see worker/lib/refresh.ts) —
+    // screen() itself never touches Polygon, it just has to report this case distinctly from
+    // a genuine no-history ticker, and it must NOT report a firstAvailable it was never given.
+    const input: ScreenInput = {
+      asOfDate: ASOF,
+      universe: universe("BNY"),
+      priceData: {
+        BNY: {
+          windowStartCandidates: [],
+          windowEndCandidates: [{ date: "2026-08-03", close: 90 }],
+          windowStartIdentityMismatch: true,
+        },
+      },
+    };
+    const result = screen(input);
+    expect(result.ranked).toHaveLength(0);
+    expect(result.insufficientHistory).toEqual([
+      {
+        ticker: "BNY",
+        name: "BNY Inc.",
+        sector: "Technology",
+        partialReturn: null,
+        firstAvailableDate: null,
+        windowEndDate: "2026-08-03",
+        windowEndPrice: 90,
+        reason: "identity-mismatch",
       },
     ]);
   });
@@ -102,6 +135,7 @@ describe("screen()", () => {
         firstAvailableDate: null,
         windowEndDate: null,
         windowEndPrice: null,
+        reason: "no-history",
       },
     ]);
   });

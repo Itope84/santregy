@@ -3,11 +3,21 @@ import type { ScreenResult, TickerPriceSeries } from "../types";
 import { cacheAgeHours, readScreenCache, writeScreenCache } from "./cache";
 import { fetchConstituents } from "./constituents";
 import { subtractMonths } from "./dates";
-import { firstAvailableBar, resolveWindowCandidates } from "./polygon";
+import { firstAvailableBar, resolveWindowCandidates, tickerCikAsOf } from "./polygon";
 import { screen } from "./screen";
 
 /** Spec-mandated freshness threshold: a cached result younger than this is served as-is. */
 export const CACHE_TTL_HOURS = 24;
+
+/**
+ * A window-start-to-end move beyond this is implausible for an S&P 500 constituent and more
+ * likely a data bug than a real one — Grouped Daily has no company-identity field, so a
+ * ticker that was reused or renamed within the lookback window can silently attach an
+ * unrelated company's old price to today's constituent (see git history: this is exactly
+ * what happened with a since-renamed ticker showing a fake ~1500% return). Anything past this
+ * threshold gets an extra identity check before it's trusted.
+ */
+const EXTREME_RETURN_THRESHOLD = 5; // 500%
 
 export interface ScreenRunResult {
   result: ScreenResult;
@@ -66,10 +76,35 @@ async function computeScreen(env: Env, asOfDate: string): Promise<ScreenResult> 
     };
   }
 
+  // Implausible-return tickers get their window-start candidate identity-checked before
+  // being trusted — see EXTREME_RETURN_THRESHOLD above. This only costs extra calls for the
+  // rare ticker that actually trips the threshold (typically zero per refresh).
+  for (const ticker of tickers) {
+    const series = priceData[ticker];
+    const start = series.windowStartCandidates[0];
+    const end = series.windowEndCandidates[0];
+    if (!start || !end) continue;
+    const impliedReturn = end.close / start.close - 1;
+    if (Math.abs(impliedReturn) <= EXTREME_RETURN_THRESHOLD) continue;
+
+    const startCik = await tickerCikAsOf(ticker, start.date, env.POLYGON_API_KEY);
+    const endCik = await tickerCikAsOf(ticker, end.date, env.POLYGON_API_KEY);
+    if (!startCik || !endCik || startCik !== endCik) {
+      console.warn(
+        `Discarding window-start price for ${ticker}: implied ${(impliedReturn * 100).toFixed(0)}% return failed identity check (start CIK ${startCik ?? "?"}, end CIK ${endCik ?? "?"})`,
+      );
+      series.windowStartCandidates = [];
+      series.windowStartIdentityMismatch = true;
+    }
+  }
+
   // Only chase a first-trade date for tickers we couldn't resolve at window start — this is
-  // what keeps a refresh to a handful of Polygon calls instead of one per constituent.
+  // what keeps a refresh to a handful of Polygon calls instead of one per constituent. Skip
+  // identity-mismatch tickers: unlike a genuine gap, Polygon's per-ticker range endpoint may
+  // itself blend history across a reused symbol, so guessing a "first available" date there
+  // risks compounding one unverified assumption with another — better to report unknown.
   const missingAtStart = [...tickers].filter(
-    (t) => priceData[t].windowStartCandidates.length === 0,
+    (t) => priceData[t].windowStartCandidates.length === 0 && !priceData[t].windowStartIdentityMismatch,
   );
   const lookbackFrom = subtractMonths(asOfDate, 25); // stays within Polygon's free 2yr history
   for (const ticker of missingAtStart) {

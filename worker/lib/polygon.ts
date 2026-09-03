@@ -103,6 +103,32 @@ export async function resolveWindowCandidates(
   return byTicker;
 }
 
+/**
+ * The CIK (a stable SEC company identifier) a ticker symbol pointed to as of `date`, or null
+ * if it can't be determined (no active ticker on that date, or the lookup itself failed).
+ * Used to catch ticker-symbol reuse/renames: Grouped Daily carries no company-identity field,
+ * only the ticker string, so a symbol that changed hands within the lookback window would
+ * otherwise silently attach an unrelated company's historical price to today's constituent.
+ * Returns null rather than throwing on failure so a caller can treat "couldn't verify" the
+ * same as "verification failed" — safer than assuming an unverifiable price is fine.
+ */
+export async function tickerCikAsOf(
+  ticker: string,
+  date: string,
+  apiKey: string,
+): Promise<string | null> {
+  try {
+    const json = await polygonFetch(
+      `/v3/reference/tickers/${encodeURIComponent(ticker)}?date=${date}`,
+      apiKey,
+    );
+    if (json.status !== "OK" || !json.results?.cik) return null;
+    return json.results.cik as string;
+  } catch {
+    return null;
+  }
+}
+
 /** First-ever daily bar for a single ticker within [from, to]. Used only for the small
  * number of tickers that fail window-start resolution (recent IPOs/spinoffs/additions). */
 export async function firstAvailableBar(
