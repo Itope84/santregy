@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type ScreenResponse } from "../api";
-import { formatDateTime, formatPct } from "../format";
+import { formatCurrency, formatDateTime, formatPct } from "../format";
 
 export function ScreenPanel() {
   const [screen, setScreen] = useState<ScreenResponse | null>(null);
@@ -102,6 +102,8 @@ function RankedTable({ rows }: { rows: ScreenResponse["entries"] }) {
           <th>Ticker</th>
           <th>Company</th>
           <th>Sector</th>
+          <th>Window start</th>
+          <th>Window end</th>
           <th className="numeric">Trailing return</th>
         </tr>
       </thead>
@@ -111,6 +113,12 @@ function RankedTable({ rows }: { rows: ScreenResponse["entries"] }) {
             <td>{e.ticker}</td>
             <td>{e.name}</td>
             <td>{e.sector}</td>
+            <td>
+              {e.windowStartDate} @ {formatCurrency(e.windowStartPrice)}
+            </td>
+            <td>
+              {e.windowEndDate} @ {formatCurrency(e.windowEndPrice)}
+            </td>
             <td className="numeric">{formatPct(e.trailingReturn)}</td>
           </tr>
         ))}
