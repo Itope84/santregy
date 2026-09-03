@@ -4,13 +4,13 @@ import {
   acquireRefreshLock,
   cacheAgeHours,
   type CachedScreen,
+  markRefreshComplete,
   readScreenCache,
-  releaseRefreshLock,
   writeScreenCache,
 } from "./cache";
 import { fetchConstituents } from "./constituents";
 import { subtractMonths } from "./dates";
-import { firstAvailableBar, resolveWindowCandidates, tickerCikAsOf } from "./polygon";
+import { firstAvailableBar, resolveWindowCandidates } from "./polygon";
 import { screen } from "./screen";
 
 /** Minimal duck-typed subset of Workers' ExecutionContext (just the one method used here) —
@@ -22,16 +22,6 @@ export interface WaitUntilContext {
 
 /** Spec-mandated freshness threshold: a cached result younger than this is served as-is. */
 export const CACHE_TTL_HOURS = 24;
-
-/**
- * A window-start-to-end move beyond this is implausible for an S&P 500 constituent and more
- * likely a data bug than a real one — Grouped Daily has no company-identity field, so a
- * ticker that was reused or renamed within the lookback window can silently attach an
- * unrelated company's old price to today's constituent (see git history: this is exactly
- * what happened with a since-renamed ticker showing a fake ~1500% return). Anything past this
- * threshold gets an extra identity check before it's trusted.
- */
-const EXTREME_RETURN_THRESHOLD = 5; // 500%
 
 export interface ScreenRunResult {
   result: ScreenResult;
@@ -102,15 +92,23 @@ export async function triggerScreenRefresh(
     return { status: "already-running", cached };
   }
 
+  const startedAt = Date.now();
+  console.log(`[screen-refresh] starting: asOfDate=${asOfDate}`);
+
   ctx.waitUntil(
     (async () => {
       try {
         const result = await computeScreen(env, asOfDate);
         await writeScreenCache(env.DB, result, new Date().toISOString());
+        console.log(
+          `[screen-refresh] done in ${Date.now() - startedAt}ms: ` +
+            `ranked=${result.ranked.length} insufficientHistory=${result.insufficientHistory.length}`,
+        );
+        await markRefreshComplete(env.DB, true, null);
       } catch (err) {
-        console.error("Background screen refresh failed:", err);
-      } finally {
-        await releaseRefreshLock(env.DB);
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[screen-refresh] failed after ${Date.now() - startedAt}ms:`, err);
+        await markRefreshComplete(env.DB, false, message);
       }
     })(),
   );
@@ -121,21 +119,31 @@ export async function triggerScreenRefresh(
 async function computeScreen(env: Env, asOfDate: string): Promise<ScreenResult> {
   const universe = await fetchConstituents();
   const tickers = new Set(universe.map((c) => c.ticker));
+  console.log(`[screen-refresh] fetched ${universe.length} constituents`);
 
   const windowStartTarget = subtractMonths(asOfDate, 13);
   const windowEndTarget = subtractMonths(asOfDate, 1);
 
   // Sequential (not Promise.all): each call is itself a run of up to 5 throttled Polygon
   // requests, and there's no benefit to interleaving them.
+  console.log(`[screen-refresh] resolving window start (target ${windowStartTarget})`);
   const startCandidates = await resolveWindowCandidates(
     windowStartTarget,
     tickers,
     env.POLYGON_API_KEY,
   );
+  console.log(
+    `[screen-refresh] window start resolved for ${startCandidates.size}/${tickers.size} tickers`,
+  );
+
+  console.log(`[screen-refresh] resolving window end (target ${windowEndTarget})`);
   const endCandidates = await resolveWindowCandidates(
     windowEndTarget,
     tickers,
     env.POLYGON_API_KEY,
+  );
+  console.log(
+    `[screen-refresh] window end resolved for ${endCandidates.size}/${tickers.size} tickers`,
   );
 
   const priceData: Record<string, TickerPriceSeries> = {};
@@ -146,35 +154,14 @@ async function computeScreen(env: Env, asOfDate: string): Promise<ScreenResult> 
     };
   }
 
-  // Implausible-return tickers get their window-start candidate identity-checked before
-  // being trusted — see EXTREME_RETURN_THRESHOLD above. This only costs extra calls for the
-  // rare ticker that actually trips the threshold (typically zero per refresh).
-  for (const ticker of tickers) {
-    const series = priceData[ticker];
-    const start = series.windowStartCandidates[0];
-    const end = series.windowEndCandidates[0];
-    if (!start || !end) continue;
-    const impliedReturn = end.close / start.close - 1;
-    if (Math.abs(impliedReturn) <= EXTREME_RETURN_THRESHOLD) continue;
-
-    const startCik = await tickerCikAsOf(ticker, start.date, env.POLYGON_API_KEY);
-    const endCik = await tickerCikAsOf(ticker, end.date, env.POLYGON_API_KEY);
-    if (!startCik || !endCik || startCik !== endCik) {
-      console.warn(
-        `Discarding window-start price for ${ticker}: implied ${(impliedReturn * 100).toFixed(0)}% return failed identity check (start CIK ${startCik ?? "?"}, end CIK ${endCik ?? "?"})`,
-      );
-      series.windowStartCandidates = [];
-      series.windowStartIdentityMismatch = true;
-    }
-  }
-
   // Only chase a first-trade date for tickers we couldn't resolve at window start — this is
-  // what keeps a refresh to a handful of Polygon calls instead of one per constituent. Skip
-  // identity-mismatch tickers: unlike a genuine gap, Polygon's per-ticker range endpoint may
-  // itself blend history across a reused symbol, so guessing a "first available" date there
-  // risks compounding one unverified assumption with another — better to report unknown.
+  // what keeps a refresh to a handful of Polygon calls instead of one per constituent.
   const missingAtStart = [...tickers].filter(
-    (t) => priceData[t].windowStartCandidates.length === 0 && !priceData[t].windowStartIdentityMismatch,
+    (t) => priceData[t].windowStartCandidates.length === 0,
+  );
+  console.log(
+    `[screen-refresh] ${missingAtStart.length} tickers missing at window start; ` +
+      `chasing first-available dates`,
   );
   const lookbackFrom = subtractMonths(asOfDate, 25); // stays within Polygon's free 2yr history
   for (const ticker of missingAtStart) {

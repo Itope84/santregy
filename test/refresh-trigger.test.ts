@@ -1,12 +1,14 @@
 import { createExecutionContext, env, fetchMock, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Env } from "../worker/env";
-import { readScreenCache } from "../worker/lib/cache";
+import { getLastRefreshError, isRefreshInProgress, readScreenCache } from "../worker/lib/cache";
 import { _setThrottleIntervalForTests } from "../worker/lib/polygon";
 import { triggerScreenRefresh } from "../worker/lib/refresh";
 
 const testEnv = env as unknown as Env;
 const ASOF = "2026-09-02";
+
+let failGroupedDaily = false;
 
 beforeAll(() => {
   _setThrottleIntervalForTests(0);
@@ -22,11 +24,16 @@ beforeAll(() => {
   fetchMock
     .get("https://api.polygon.io")
     .intercept({ path: /\/v2\/aggs\/grouped\/locale\/us\/market\/stocks\//, method: "GET" })
-    .reply(200, { status: "OK", resultsCount: 1, results: [{ T: "AAA", c: 100 }] })
+    .reply((): { statusCode: number; data: Record<string, unknown> } =>
+      failGroupedDaily
+        ? { statusCode: 500, data: { status: "ERROR", message: "simulated failure" } }
+        : { statusCode: 200, data: { status: "OK", resultsCount: 1, results: [{ T: "AAA", c: 100 }] } },
+    )
     .persist();
 });
 
 beforeEach(async () => {
+  failGroupedDaily = false;
   await testEnv.DB.prepare("DELETE FROM screen_cache").run();
   await testEnv.DB.prepare("DELETE FROM screen_refresh_lock").run();
 });
@@ -45,10 +52,8 @@ describe("triggerScreenRefresh", () => {
     expect(cached?.result.asOfDate).toBe(ASOF);
     expect(cached?.result.ranked.map((r) => r.ticker)).toEqual(["AAA"]);
 
-    const lockRow = await testEnv.DB.prepare(
-      "SELECT 1 FROM screen_refresh_lock WHERE id = 1",
-    ).first();
-    expect(lockRow).toBeNull(); // released once the background refresh completed
+    expect(await isRefreshInProgress(testEnv.DB, new Date())).toBe(false);
+    expect(await getLastRefreshError(testEnv.DB)).toBeNull(); // succeeded, so no error recorded
   });
 
   it("does not start a second background refresh while one is already in flight", async () => {
@@ -76,5 +81,27 @@ describe("triggerScreenRefresh", () => {
 
     expect(result.status).toBe("served-cache");
     expect(result.cached?.result.asOfDate).toBe(ASOF);
+  });
+
+  it("records a failed refresh's error so it's visible without checking the logs, and allows a retry", async () => {
+    failGroupedDaily = true;
+    const ctx1 = createExecutionContext();
+    await triggerScreenRefresh(testEnv, ASOF, ctx1);
+    await waitOnExecutionContext(ctx1);
+
+    expect(await isRefreshInProgress(testEnv.DB, new Date())).toBe(false);
+    const failure = await getLastRefreshError(testEnv.DB);
+    expect(failure?.error).toContain("Polygon request failed");
+
+    // A subsequent trigger must not be stuck behind the failed attempt's row.
+    failGroupedDaily = false;
+    const ctx2 = createExecutionContext();
+    const retry = await triggerScreenRefresh(testEnv, ASOF, ctx2);
+    expect(retry.status).toBe("started");
+    await waitOnExecutionContext(ctx2);
+
+    expect(await getLastRefreshError(testEnv.DB)).toBeNull(); // cleared by the successful retry
+    const cached = await readScreenCache(testEnv.DB);
+    expect(cached?.result.asOfDate).toBe(ASOF);
   });
 });

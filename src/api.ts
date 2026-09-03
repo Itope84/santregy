@@ -25,7 +25,6 @@ export interface InsufficientHistoryEntry {
   firstAvailableDate: string | null;
   windowEndDate: string | null;
   windowEndPrice: number | null;
-  reason: "no-history" | "identity-mismatch";
 }
 
 export interface ScreenResponse {
@@ -35,6 +34,10 @@ export interface ScreenResponse {
   asOfDate?: string;
   entries?: PickEntry[];
   insufficientHistory?: InsufficientHistoryEntry[];
+  /** Set only if the most recent refresh attempt (whether triggered by this user or the
+   * cron) failed and no newer attempt has started since. Cleared once a new refresh begins. */
+  lastError?: string;
+  lastErrorAt?: string;
 }
 
 export interface RunScreenResponse extends ScreenResponse {

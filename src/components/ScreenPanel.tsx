@@ -75,6 +75,11 @@ export function ScreenPanel() {
       ) : !screen?.computedAt ? (
         <p className="meta">No screen has been run yet.</p>
       ) : null}
+      {!refreshing && screen?.lastError && (
+        <p className="error">
+          Last refresh attempt failed{screen.lastErrorAt ? ` (${formatDateTime(screen.lastErrorAt)})` : ""}: {screen.lastError}
+        </p>
+      )}
       <button className="primary" onClick={run} disabled={starting || refreshing}>
         {refreshing ? "Refreshing..." : starting ? "Starting..." : "Run screen"}
       </button>
@@ -97,14 +102,16 @@ export function ScreenPanel() {
       {insufficient.length > 0 && (
         <>
           <h3 style={{ marginTop: 24 }}>Insufficient history</h3>
-          <p className="meta">Not ranked — see reason per row.</p>
+          <p className="meta">
+            Not ranked — their price history doesn't reach the full window (recent IPO,
+            spinoff, or index addition).
+          </p>
           <table>
             <thead>
               <tr>
                 <th>Ticker</th>
                 <th>Company</th>
                 <th>Sector</th>
-                <th>Reason</th>
                 <th>First available</th>
                 <th className="numeric">Partial return</th>
               </tr>
@@ -115,11 +122,6 @@ export function ScreenPanel() {
                   <td>{e.ticker}</td>
                   <td>{e.name}</td>
                   <td>{e.sector}</td>
-                  <td>
-                    {e.reason === "identity-mismatch"
-                      ? "Ticker changed hands — price unverifiable"
-                      : "Recent IPO, spinoff, or index addition"}
-                  </td>
                   <td>{e.firstAvailableDate ?? "—"}</td>
                   <td className="numeric">{formatPct(e.partialReturn)}</td>
                 </tr>

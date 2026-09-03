@@ -69,27 +69,23 @@ count, so mixing window-start and window-end prices from different cache generat
 an intervening split would silently corrupt the return — never read the two endpoints from
 separately-cached data.
 
-### Ticker-identity verification (found in production)
+### Known gap, deliberately not handled: ticker-identity mismatches
 
 Grouped Daily carries only a ticker string and a close, no company-identity field. A real run
-against production data showed the actual failure mode: a constituent's ticker had apparently
-changed hands within the 13-month lookback window, so the window-start price attached to
-*today's* company was really some unrelated (much cheaper) security's price — an implied
-~1,550% "return" that was briefly ranked as a top pick before this was caught.
+against production data showed the actual failure mode this creates: a constituent's ticker
+had apparently changed hands within the 13-month lookback window, so the window-start price
+attached to *today's* company was really some unrelated (much cheaper) security's price — an
+implied ~1,550% "return" that was briefly ranked as a top pick.
 
-`computeScreen()` now flags any implied return past `EXTREME_RETURN_THRESHOLD` (500%) and
-verifies it via `tickerCikAsOf()` — Polygon's `/v3/reference/tickers/{ticker}?date=...`,
-compared between the window-start and window-end dates. A CIK mismatch (or an inconclusive
-lookup) discards the window-start candidate and moves the ticker to `insufficientHistory` with
-`reason: "identity-mismatch"`, distinct from a genuine no-history ticker — it deliberately does
-*not* attempt a `firstAvailableBar` guess for these, since that endpoint could have the same
-ticker-reuse ambiguity and guessing twice compounds the risk rather than resolving it. A
-legitimately huge return (same CIK at both dates) still ranks normally — see
-`test/refresh-identity.test.ts`.
-
-This only adds Polygon calls for tickers that actually trip the threshold — typically zero per
-refresh. It's a targeted fix for the one failure mode observed, not a general point-in-time
-constituent-identity system (that's explicitly deferred scope).
+An earlier version of this code verified any implausible-looking return against Polygon's
+ticker reference endpoint before trusting it (2 extra throttled calls per flagged ticker). It
+was removed: the extra calls made refreshes meaningfully slower and less predictable in
+duration for a failure mode that's genuinely rare (ticker reuse landing on a *current* S&P 500
+constituent, within one 13-month window, producing a large enough gap to matter), and the app's
+premise is a human reviewing picks before buying, not automated trading — each ranked entry
+already shows its window-start/end price and date in the UI (`ScreenPanel.tsx`), which is
+enough for a human to catch a price that's obviously wrong. If this class of bug resurfaces,
+that's the tradeoff to revisit, not an accidental oversight.
 
 ### The "run screen" button doesn't wait for the refresh (found in production)
 
@@ -100,18 +96,38 @@ running server-side and wrote the cache regardless (Workers execution isn't tied
 client still listening).
 
 `POST /api/screen/run` (`triggerScreenRefresh` in `worker/lib/refresh.ts`) no longer blocks on
-this: if the cache is stale, it acquires a lock (`screen_refresh_lock`, a single row that
-exists only while a refresh is running — see migration `0002`), kicks the actual work off via
-`ctx.waitUntil()`, and returns immediately with whatever's currently cached (possibly stale)
-plus a `status` of `"started"`. The frontend (`ScreenPanel.tsx`) then polls `GET /api/screen`
-every 5s — which also reports `refreshing` — until it sees the refresh finish. A second trigger
-while one is already running (a double-click, or the daily cron firing mid-refresh) gets
-`"already-running"` and does not start a duplicate; the lock self-clears after 10 minutes if a
-refresh ever crashes without releasing it, so it can't wedge permanently.
+this: if the cache is stale, it acquires a lock (a single row in `screen_refresh_lock` — see
+migrations `0002`/`0003`), kicks the actual work off via `ctx.waitUntil()`, and returns
+immediately with whatever's currently cached (possibly stale) plus a `status` of `"started"`.
+The frontend (`ScreenPanel.tsx`) then polls `GET /api/screen` every 5s — which also reports
+`refreshing` — until it sees the refresh finish. A second trigger while one is already running
+(a double-click, or the daily cron firing mid-refresh) gets `"already-running"` and does not
+start a duplicate; an unfinished row self-clears after 10 minutes if a refresh ever crashes
+without reaching completion, so it can't wedge permanently.
 
 The daily notification cron does **not** go through this path — it calls `getOrRefreshScreen`
 directly and awaits the real result, since it needs actual picks to put in the email, and a
 scheduled Worker invocation isn't subject to the same client-facing timeout risk.
+
+### Visibility into background refreshes (found in production)
+
+The first two production incidents above were hard to diagnose from the outside: a run would
+either time out or just never seem to finish, with nothing in the UI explaining why. Two
+changes address that directly:
+
+- **Structured logging throughout the refresh** (`worker/lib/refresh.ts`, `worker/lib/polygon.ts`):
+  every Polygon call logs its path, HTTP status, and latency; `computeScreen()` logs each major
+  step (constituents fetched, window-start/end resolution counts, how many tickers needed a
+  first-available lookup) and total duration on completion. These are plain `console.log`
+  calls — Workers Logs (`observability.enabled` in `wrangler.jsonc`) captures them, viewable in
+  the Cloudflare dashboard or via `npx wrangler tail`, correlated by the `[screen-refresh]` /
+  `[polygon]` prefixes.
+- **The last failure is recorded, not just logged**: `screen_refresh_lock` now also tracks
+  `finished_at`/`ok`/`error` (migration `0003`), updated in a `finally` so it captures the
+  outcome whether the refresh succeeded or threw. `GET /api/screen` (and the response from
+  `POST /run`) includes `lastError`/`lastErrorAt` whenever the most recent attempt failed and
+  no newer one has started since — the UI shows this directly instead of requiring a trip to
+  the dashboard. A new attempt clears it.
 
 ## Beyond the screen: "current value" needs its own price cache
 
