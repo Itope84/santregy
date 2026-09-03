@@ -1,10 +1,24 @@
 import type { Env } from "../env";
 import type { ScreenResult, TickerPriceSeries } from "../types";
-import { cacheAgeHours, readScreenCache, writeScreenCache } from "./cache";
+import {
+  acquireRefreshLock,
+  cacheAgeHours,
+  type CachedScreen,
+  readScreenCache,
+  releaseRefreshLock,
+  writeScreenCache,
+} from "./cache";
 import { fetchConstituents } from "./constituents";
 import { subtractMonths } from "./dates";
 import { firstAvailableBar, resolveWindowCandidates, tickerCikAsOf } from "./polygon";
 import { screen } from "./screen";
+
+/** Minimal duck-typed subset of Workers' ExecutionContext (just the one method used here) —
+ * avoids depending on the exact ExecutionContext shape, which differs between
+ * @cloudflare/workers-types and the one Hono's Context.executionCtx returns. */
+export interface WaitUntilContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
 
 /** Spec-mandated freshness threshold: a cached result younger than this is served as-is. */
 export const CACHE_TTL_HOURS = 24;
@@ -46,6 +60,62 @@ export async function getOrRefreshScreen(env: Env, asOfDate: string): Promise<Sc
   const computedAt = now.toISOString();
   await writeScreenCache(env.DB, result, computedAt);
   return { result, computedAt, fromCache: false };
+}
+
+export interface TriggerRefreshResult {
+  /** "served-cache": already fresh, nothing to do. "started": a background refresh was just
+   * kicked off. "already-running": one was already in flight (e.g. a double-click); not
+   * started again. */
+  status: "served-cache" | "started" | "already-running";
+  /** Whatever is currently cached, possibly stale — the caller shows this immediately rather
+   * than blocking on the refresh, which can take a couple of minutes (throttled Polygon
+   * calls) and would otherwise risk the HTTP request itself timing out client-side even
+   * though the Worker keeps running and writes the cache regardless. */
+  cached: CachedScreen | null;
+}
+
+/**
+ * The HTTP-facing entry point for the "run screen" button. Never blocks on the actual
+ * refresh — returns immediately, and the caller (see worker/routes/screen.ts) must pass its
+ * ExecutionContext so the refresh can run via ctx.waitUntil after the response is sent.
+ * The cron/notification path uses getOrRefreshScreen directly instead, since it needs the
+ * real result synchronously to build the email — this function is only for a UI that will
+ * poll GET /api/screen afterward.
+ */
+export async function triggerScreenRefresh(
+  env: Env,
+  asOfDate: string,
+  ctx: WaitUntilContext,
+): Promise<TriggerRefreshResult> {
+  const cached = await readScreenCache(env.DB);
+  const now = new Date();
+  if (
+    cached &&
+    cached.result.asOfDate === asOfDate &&
+    cacheAgeHours(cached.computedAt, now) < CACHE_TTL_HOURS
+  ) {
+    return { status: "served-cache", cached };
+  }
+
+  const acquired = await acquireRefreshLock(env.DB, now);
+  if (!acquired) {
+    return { status: "already-running", cached };
+  }
+
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const result = await computeScreen(env, asOfDate);
+        await writeScreenCache(env.DB, result, new Date().toISOString());
+      } catch (err) {
+        console.error("Background screen refresh failed:", err);
+      } finally {
+        await releaseRefreshLock(env.DB);
+      }
+    })(),
+  );
+
+  return { status: "started", cached };
 }
 
 async function computeScreen(env: Env, asOfDate: string): Promise<ScreenResult> {

@@ -30,11 +30,15 @@ export interface InsufficientHistoryEntry {
 
 export interface ScreenResponse {
   cached: boolean;
-  fromCache?: boolean;
+  refreshing: boolean;
   computedAt?: string;
   asOfDate?: string;
   entries?: PickEntry[];
   insufficientHistory?: InsufficientHistoryEntry[];
+}
+
+export interface RunScreenResponse extends ScreenResponse {
+  status: "served-cache" | "started" | "already-running";
 }
 
 export interface Purchase {
@@ -98,7 +102,7 @@ export const api = {
     request<User>("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
 
   getScreen: () => request<ScreenResponse>("/api/screen"),
-  runScreen: () => request<ScreenResponse>("/api/screen/run", { method: "POST" }),
+  runScreen: () => request<RunScreenResponse>("/api/screen/run", { method: "POST" }),
 
   listPurchases: () => request<Purchase[]>("/api/purchases"),
   createPurchase: (p: Omit<Purchase, "id">) =>

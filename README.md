@@ -91,6 +91,28 @@ This only adds Polygon calls for tickers that actually trip the threshold — ty
 refresh. It's a targeted fix for the one failure mode observed, not a general point-in-time
 constituent-identity system (that's explicitly deferred scope).
 
+### The "run screen" button doesn't wait for the refresh (found in production)
+
+A real refresh makes ~10 Grouped Daily calls, each paced ~13s apart to respect Polygon's 5
+calls/min free-tier limit — a couple of minutes. A production run showed the button's HTTP
+request could time out client-side well before that finished, even though the Worker kept
+running server-side and wrote the cache regardless (Workers execution isn't tied to the
+client still listening).
+
+`POST /api/screen/run` (`triggerScreenRefresh` in `worker/lib/refresh.ts`) no longer blocks on
+this: if the cache is stale, it acquires a lock (`screen_refresh_lock`, a single row that
+exists only while a refresh is running — see migration `0002`), kicks the actual work off via
+`ctx.waitUntil()`, and returns immediately with whatever's currently cached (possibly stale)
+plus a `status` of `"started"`. The frontend (`ScreenPanel.tsx`) then polls `GET /api/screen`
+every 5s — which also reports `refreshing` — until it sees the refresh finish. A second trigger
+while one is already running (a double-click, or the daily cron firing mid-refresh) gets
+`"already-running"` and does not start a duplicate; the lock self-clears after 10 minutes if a
+refresh ever crashes without releasing it, so it can't wedge permanently.
+
+The daily notification cron does **not** go through this path — it calls `getOrRefreshScreen`
+directly and awaits the real result, since it needs actual picks to put in the email, and a
+scheduled Worker invocation isn't subject to the same client-facing timeout risk.
+
 ## Beyond the screen: "current value" needs its own price cache
 
 The spec's caching section describes one global cache for the screen (window-start/end
